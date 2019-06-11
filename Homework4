@@ -1,0 +1,199 @@
+###charDevDriver.cpp
+#include "charDevDriver.h"
+#include "DriverFileOperation.h"
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("zhaoj");
+MODULE_DESCRIPTION("a simple linux char driver example");
+
+/**
+ * linux操作系统中一切都是文件，设备也是文件。
+ * linux/fs.h定义file_operations结构体
+ * 这里定义文件操作的相关联的回调函数
+ * 字符设备的基本功能包括打开，关闭，读取，写入
+ */
+
+struct file_operations fops = {
+    .owner = THIS_MODULE,
+    .open  = DriverOpen,
+    .release = DriverRelease,
+    .read = DriverRead,
+    .write = DriverWrite,
+};
+
+static int __init charMsgDriverInit(void)
+{
+    printk("charMsgDriver init...");
+    //
+    majorNumber = register_chrdev(0, DEVICE_NAME, &fops);
+    if(majorNumber < 0)
+    {
+        printk("charMsgDriver: failed to register a major number.\n");
+        return majorNumber;
+    }
+
+    printk("charMsgDriver: registered major number :%d successfully\n", majorNumber);
+
+    //注册设备类
+    pcharMsgDriverClass = class_create(THIS_MODULE, CLASS_NAME);
+    if(IS_ERR(pcharMsgDriverClass))
+    {
+        //注册失败，清理环境
+        unregister_chrdev(majorNumber, DEVICE_NAME);
+
+        printk("charMsgDriver: failed to register device class.\n");
+        return PTR_ERR(pcharMsgDriverClass);
+    }
+
+    //注册设备驱动
+    pCharMsgDriverDevice = device_create(pcharMsgDriverClass, NULL, MKDEV(majorNumber,0), NULL, DEVICE_NAME);
+    if(IS_ERR(pCharMsgDriverDevice))
+    {
+        //注册失败，清理环境
+        class_destroy(pcharMsgDriverClass);
+        unregister_chrdev(majorNumber,DEVICE_NAME);
+
+        printk("charMsgDriver: failed to create device.\n");
+        return PTR_ERR(pCharMsgDriverDevice);
+    }
+
+    printk("charMsgDriver: device create correctly.\n");
+    return 0;
+}
+
+static void __exit charMsgDriverExit(void)
+{
+    device_destroy(pcharMsgDriverClass, MKDEV(majorNumber,0));
+    class_unregister(pcharMsgDriverClass);
+    class_destroy(pcharMsgDriverClass);
+    unregister_chrdev(majorNumber, DEVICE_NAME);
+    printk("charMsgDriver: goodbye.\n");
+}
+
+module_init(charMsgDriverInit);
+module_exit(charMsgDriverExit);
+
+
+###DriverFileOperation.cpp
+#include "DriverFileOperation.h"
+
+int DriverOpen(struct inode *pInodeStruct, struct file *pFileStruct)
+{
+    DeviceOpenNumbers++;
+    printk(DEVICE_NAME ":device opened %d times.\n",DeviceOpenNumbers);
+    return 0;
+}
+
+int DriverRelease(struct inode *pInodeStruct, struct file *pFileStruct)
+{
+    printk(DEVICE_NAME ": close invoked.\n");
+    return 0;
+}
+
+ssize_t DriverRead(struct file *pFileStruct, char __user *pBuffer, size_t count, loff_t *pOffset)
+{
+    int error_count = 0;
+    error_count = copy_to_user(pBuffer,msg,size_of_msg);
+    if(error_count==0)
+    {
+        printk(DEVICE_NAME ":send %d characters to user.\n", size_of_msg);
+        return (size_of_msg=0);
+    }
+    else
+    {
+        printk(DEVICE_NAME ":failed to read from device.\n");
+        return -EFAULT;
+    }
+    //printk(DEVICE_NAME ":read invoked.\n");
+    //return 0;
+}
+
+ssize_t DriverWrite(struct file *pFileStruct, const char __user *pBuffer, size_t count, loff_t *pOffset)
+{
+    sprintf(msg, "%s(%d letters)", pBuffer, count);
+    size_of_msg=strlen(msg);
+    printk(DEVICE_NAME ":received %d characters from the user.\n",count);
+    return 0;
+}
+
+
+###.h
+#ifndef DriverFileOperation_H
+#define DriverFileOperation_H
+
+#include "charDevDriver.h"
+
+int DriverOpen(struct inode *pInodeStruct,struct file *pFileStruct);
+int DriverRelease(struct inode *pInodeStruct,struct file *pFileStruct);
+ssize_t DriverRead(struct file *pFileStruct, char __user *pBuffer, size_t count, loff_t *pOffset);
+ssize_t DriverWrite(struct file *pFileStruct, const char __user *pBuffer, size_t count, loff_t *pOffset);
+
+#endif
+
+
+
+###makefile
+obj-m :=charMsgModuel.o
+charMsgModuel-objs :=charDevDriver.o DriverFileOperation.o
+
+kernel_path=/lib/modules/$(shell uname -r)/build
+PWD :=$(shell pwd)
+
+all:
+	make -C $(kernel_path) M=$(PWD) modules
+	rm *.order *.mod.c *.o *.symvers
+clean:
+	make -C $(kernel_path) M=$(PWD) clean
+
+
+
+
+###tst_charMsgDriver
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+
+#define BUFFER_LENGTH 1024
+static char msgBuffer[BUFFER_LENGTH];
+
+int main()
+{
+    int ret,fd;
+    char toSend[BUFFER_LENGTH] = {0};
+    printf("\n");
+
+    fd = open("/dev/charMsgDriver", O_RDWR);
+    if(fd < 0)
+    {
+        perror("failed to open charMsgDriver device.\n");
+        return errno;
+    }
+
+    printf("type something to the kernel module:\n");
+    scanf("%[^\n]%*c", toSend);
+    printf("writing message to the kernel.\n");
+
+    ret = write(fd, toSend, strlen(toSend));
+    if(ret < 0)
+    {
+        perror("failed to write the message\n");
+        return errno;
+    }
+
+    printf("Press Enter to read back from the device.\n");
+    getchar();
+
+    printf("read from the device.\n");
+    ret = read(fd, msgBuffer, BUFFER_LENGTH);
+    if(ret < 0)
+    {
+        perror("failed to read message from the device.\n");
+        return errno;
+    }
+
+    printf("the msg from device is:[%s]\n", msgBuffer);
+
+    return 0;
+}
